@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The embedded hkp-rt runtime is served over plain HTTP on loopback
+  (http://127.0.0.1:<port>) and, when external access is enabled, on the LAN.
+  Requests today go through the Kotlin RemoteRuntimeBridge (a native
+  HttpURLConnection, not the WebView), but this config declares the cleartext
+  allowance explicitly and covers any future direct-from-WebView loopback fetch.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

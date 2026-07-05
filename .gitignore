@@ -1,5 +1,8 @@
 .gradle/
 build/
 app/build/
+# NDK/CMake externalNativeBuild output (huge: per-ABI _deps source copies).
+.cxx/
+app/.cxx/
 local.properties
 *.iml

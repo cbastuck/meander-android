@@ -5,9 +5,15 @@ import java.net.URL
 
 class RemoteRuntimeBridge(
     val remoteName: String,
-    private val runtimeBaseUrl: String,
 ) {
-    fun handle(method: String, path: String, query: String?, headers: Map<String, String>, body: ByteArray): HkpResponse {
+    fun handle(
+        runtimeBaseUrl: String,
+        method: String,
+        path: String,
+        query: String?,
+        headers: Map<String, String>,
+        body: ByteArray,
+    ): HkpResponse {
         if (method == "GET" && path.trim('/') == "health") {
             return HkpResponse.json(
                 200,
@@ -16,14 +22,14 @@ class RemoteRuntimeBridge(
         }
 
         return try {
-            proxy(method, path, query, headers, body)
+            proxy(runtimeBaseUrl, method, path, query, headers, body)
         } catch (error: Exception) {
             HkpResponse.json(502, """{"error":"Runtime request failed: ${escapeJson(error.message ?: "unknown")}"}""")
         }
     }
 
-    private fun proxy(method: String, path: String, query: String?, headers: Map<String, String>, body: ByteArray): HkpResponse {
-        val target = runtimeUrl(path, query)
+    private fun proxy(runtimeBaseUrl: String, method: String, path: String, query: String?, headers: Map<String, String>, body: ByteArray): HkpResponse {
+        val target = runtimeUrl(runtimeBaseUrl, path, query)
         val connection = (URL(target).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 15_000
@@ -59,7 +65,7 @@ class RemoteRuntimeBridge(
         )
     }
 
-    private fun runtimeUrl(path: String, query: String?): String {
+    private fun runtimeUrl(runtimeBaseUrl: String, path: String, query: String?): String {
         val base = runtimeBaseUrl.trimEnd('/')
         val cleanPath = path.trim('/')
         val suffix = if (cleanPath.isEmpty()) "" else "/$cleanPath"

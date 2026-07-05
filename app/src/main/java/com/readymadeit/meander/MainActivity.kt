@@ -1,9 +1,12 @@
 package com.readymadeit.meander
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
@@ -20,6 +23,7 @@ import com.readymadeit.meander.bridge.HkpSchemeRouter
 import com.readymadeit.meander.bridge.NativeAuthJavascriptBridge
 import com.readymadeit.meander.bridge.RuntimeAuthJavascriptBridge
 import com.readymadeit.meander.runtime.RuntimeHost
+import com.readymadeit.meander.runtime.RuntimeService
 import java.io.ByteArrayInputStream
 import java.io.FileNotFoundException
 import java.net.URL
@@ -35,6 +39,11 @@ class MainActivity : Activity() {
         val router = HkpSchemeRouter(applicationContext, runtimeHost)
         authBridge = AuthSessionBridge(this, packageName)
 
+        // Bring up the embedded hkp-rt runtime in a foreground service so it (and
+        // LAN discovery) keeps working while the app is backgrounded. The router
+        // resolves the runtime's port lazily, absorbing the brief startup race.
+        RuntimeService.start(applicationContext)
+
         webView = WebView(this)
         setContentView(
             webView,
@@ -43,9 +52,27 @@ class MainActivity : Activity() {
 
         configureWebView(webView, router, runtimeHost)
         handleIntent(intent)
+        requestRuntimePermissions()
 
         val devUrl = getString(R.string.dev_webapp_url)
         loadInitialUrl(devUrl)
+    }
+
+    // Runtime permissions needed on newer Android: NEARBY_WIFI_DEVICES (API 33+)
+    // gates LAN discovery; POST_NOTIFICATIONS (API 33+) lets the foreground
+    // service show its notification. Both are best-effort — discovery still fails
+    // gracefully if denied.
+    private fun requestRuntimePermissions() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        val needed = listOf(
+            Manifest.permission.NEARBY_WIFI_DEVICES,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (needed.isNotEmpty()) {
+            requestPermissions(needed.toTypedArray(), REQUEST_RUNTIME_PERMISSIONS)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -271,6 +298,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "ReadymadeAndroid"
+        private const val REQUEST_RUNTIME_PERMISSIONS = 42
 
         // Reserved Android domain for locally served app assets; requests never hit
         // the network, they are all answered in shouldInterceptRequest.

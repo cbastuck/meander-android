@@ -14,9 +14,11 @@ class HkpSchemeRouter(
 ) {
     private val boardStore = BoardStore(context)
     private val remoteName = context.getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" }
-    private val runtimeBaseUrl = runtimeHost.runtimeBaseUrl
-        ?: context.getString(R.string.hkp_runtime_base_url).ifBlank { "http://127.0.0.1:5556" }
-    private val remoteRuntime = RemoteRuntimeBridge(remoteName, runtimeBaseUrl)
+    private val remoteRuntime = RemoteRuntimeBridge(remoteName)
+
+    // Resolved per request: the embedded runtime's port is only known once the
+    // foreground service has started it, so we never cache it at construction.
+    private fun resolveRuntimeBaseUrl(): String? = runtimeHost.awaitRuntimeBaseUrl()
 
     fun handle(request: HkpRequest): HkpResponse {
         val method = request.method.uppercase()
@@ -58,6 +60,9 @@ class HkpSchemeRouter(
     }
 
     private fun serveRemotes(method: String, uri: Uri, headers: Map<String, String>, body: ByteArray): HkpResponse {
+        val runtimeBaseUrl = resolveRuntimeBaseUrl()
+            ?: return HkpResponse.json(503, jsonError("Runtime is still starting"))
+
         val path = normalizedPath(uri.path ?: "")
         if (path.isEmpty()) {
             val remotes = JSONArray().put(
@@ -77,7 +82,7 @@ class HkpSchemeRouter(
             return HkpResponse.json(404, jsonError("Unknown remote"))
         }
         val subpath = segments.drop(1).joinToString("/")
-        return remoteRuntime.handle(method, subpath, uri.query, headers, body)
+        return remoteRuntime.handle(runtimeBaseUrl, method, subpath, uri.query, headers, body)
     }
 
     private fun serveSettings(method: String, body: ByteArray): HkpResponse {
