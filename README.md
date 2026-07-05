@@ -1,4 +1,4 @@
-# readymade-android
+# meander-android
 
 Android port of the readymade Meander shell. It embeds the shared mobile web app
 in an Android `WebView`, exposes the same `hkp://` bridge used by the iOS app,
@@ -14,7 +14,24 @@ From the repo root:
 ```
 
 The script builds `meander/frontend` with the Android Vite target and copies the
-result into `readymade-android/app/src/main/assets/WebApp/`, then runs Gradle.
+result into `meander-android/app/src/main/assets/WebApp/`, then runs Gradle.
+
+If you build the APK from Android Studio instead, you don't need Gradle on your
+`PATH` — just bundle the web app (see below) and let Android Studio assemble.
+
+## How to Update the WebApp
+
+The bundled web app lives in `meander-android/app/src/main/assets/WebApp/`.
+To refresh it with the latest frontend, run from the repo root:
+
+```bash
+npm --prefix meander/frontend run update:android
+```
+
+The Android Vite target writes its output directly into the assets directory
+(`emptyOutDir` clears it first), so this single command is all the bundling
+required — no separate copy step. Afterwards, build/run the app from Android
+Studio (or run `./build-android.sh` for a full CLI build including Gradle).
 
 ## Architecture
 

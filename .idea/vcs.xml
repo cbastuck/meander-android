@@ -6,6 +6,7 @@
     <mapping directory="$PROJECT_DIR$/../hkp-node" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../hkp-python" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../hkp-website" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../meander-ios" vcs="Git" />
   </component>
 </project>
