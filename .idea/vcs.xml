@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$/.." vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../hkp-go" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../hkp-node" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../hkp-python" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../hkp-website" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../meander-ios" vcs="Git" />
+  </component>
+</project>
