@@ -7,31 +7,9 @@ to the native browser with Authorization Code + PKCE.
 
 ## Building
 
-From the repo root:
-
-```bash
-./build-android.sh Debug
-```
-
-The script builds `meander/frontend` with the Android Vite target and copies the
-result into `meander-android/app/src/main/assets/WebApp/`, then runs Gradle.
-
-If you build the APK from Android Studio instead, you don't need Gradle on your
-`PATH` — just bundle the web app (see below) and let Android Studio assemble.
-
-## How to Update the WebApp
-
-The bundled web app lives in `meander-android/app/src/main/assets/WebApp/`.
-To refresh it with the latest frontend, run from the repo root:
-
-```bash
-npm --prefix meander/frontend run update:android
-```
-
-The Android Vite target writes its output directly into the assets directory
-(`emptyOutDir` clears it first), so this single command is all the bundling
-required — no separate copy step. Afterwards, build/run the app from Android
-Studio (or run `./build-android.sh` for a full CLI build including Gradle).
+See [README-android.md](../README-android.md) in the repo root — prerequisites
+(NDK/CMake versions, the prebuilt vcpkg trees), the `./build-android.sh` CLI build,
+the Android Studio route, and how to refresh the bundled web app.
 
 ## Architecture
 
@@ -51,10 +29,12 @@ Routes:
 | `hkp://remotes/meander-android/...` | Proxies REST calls to the configured runtime |
 | `hkp://settings` | Runtime exposure settings persisted in app preferences |
 
-## Current parity note
+## Embedded runtime
 
-The iOS app starts an embedded `hkp-rt` server and registers Objective-C++ native
-services for device motion, location, microphone, and speaker. This Android port
-keeps that behind `RuntimeHost`, currently backed by a configured HTTP runtime
-URL (`@string/hkp_runtime_base_url`). Porting the embedded runtime requires JNI
-bindings plus Android-native implementations of those services.
+Like iOS, the app starts an embedded `hkp-rt` server in-process. `RuntimeHost` loads
+`libhkprt_jni.so` (built from `app/src/main/cpp/` by the Gradle `externalNativeBuild`)
+and drives it over JNI — `nativeStart` / `nativeStop` / `nativePort` /
+`nativeSetAllowedUsers` — with `RuntimeService` keeping it alive as a foreground service.
+
+Parity gap: iOS also registers Objective-C++ native services for device motion, location,
+microphone, and speaker. Those do not have Android-native implementations yet.
