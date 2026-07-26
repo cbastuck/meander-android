@@ -1,6 +1,6 @@
 # meander-android
 
-Android port of the readymade Meander shell. It embeds the shared mobile web app
+Android port of the Readymade shell. It embeds the shared mobile web app
 in an Android `WebView`, exposes the same `hkp://` bridge used by the iOS app,
 stores boards locally, proxies REST calls to a runtime, and delegates Auth0 login
 to the native browser with Authorization Code + PKCE.
