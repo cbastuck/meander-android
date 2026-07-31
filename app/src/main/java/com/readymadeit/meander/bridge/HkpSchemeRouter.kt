@@ -41,7 +41,19 @@ class HkpSchemeRouter(
 
     private fun serveBoards(method: String, uri: Uri, body: ByteArray): HkpResponse {
         val boardName = decode(normalizedPath(uri.path ?: ""))
+        // "?meta=1" asks for the listing as objects carrying each board's
+        // last-write time instead of bare names.
+        val wantsMetadata = uri.getQueryParameter("meta")?.let { it != "0" } ?: false
         return when {
+            method == "GET" && boardName.isEmpty() && wantsMetadata ->
+                HkpResponse.json(
+                    200,
+                    JSONArray(
+                        boardStore.listBoardEntries().map {
+                            JSONObject(mapOf("name" to it.name, "modified" to it.modified))
+                        },
+                    ).toString(),
+                )
             method == "GET" && boardName.isEmpty() ->
                 HkpResponse.json(200, JSONArray(boardStore.listBoards()).toString())
             method == "GET" ->
