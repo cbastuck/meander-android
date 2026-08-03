@@ -190,7 +190,11 @@ Java_com_readymadeit_meander_runtime_RuntimeHost_nativeStart(
     authConfig.mode = hkp::AuthMode::Jwt;
     hkp::TrustedIssuer issuer;
     issuer.iss = "https://hookitapp.eu.auth0.com/";
-    issuer.audiences = {"gpk8IFPKfaOTQUzpDRO7vBajOnB72rkM"};
+    // Both Auth0 applications: the token's `aud` is the client id that signed
+    // the caller in, and a browser reaching this runtime over the LAN carries
+    // the website's, not the app's.
+    issuer.audiences = {"gpk8IFPKfaOTQUzpDRO7vBajOnB72rkM",   // Native — the apps
+                        "x4iF0MBYfd25oLdJbATNe03dCDUtBs74"};  // SPA — website
     authConfig.issuers.push_back(issuer);
 
     auto server = std::make_shared<hkp::Server>(
