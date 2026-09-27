@@ -13,6 +13,7 @@ class HkpSchemeRouter(
     private val runtimeHost: RuntimeHost,
 ) {
     private val boardStore = BoardStore(context)
+    private val presetStore = PresetStore(context)
     private val remoteName = context.getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" }
     private val remoteRuntime = RemoteRuntimeBridge(remoteName)
 
@@ -30,6 +31,7 @@ class HkpSchemeRouter(
         return try {
             when (uri.host) {
                 "boards" -> serveBoards(method, uri, request.body)
+                "presets" -> servePresets(method, uri, request.body)
                 "remotes" -> serveRemotes(method, uri, request.headers, request.body)
                 "settings" -> serveSettings(method, request.body)
                 else -> HkpResponse.json(404, jsonError("Unknown route: ${request.url}"))
@@ -68,6 +70,33 @@ class HkpSchemeRouter(
                 HkpResponse.json(200, JSONObject(mapOf("deleted" to boardName)).toString())
             }
             else -> HkpResponse.json(405, jsonError("Unsupported boards request"))
+        }
+    }
+
+    // The preset library: every file listed unparsed (the web app reads them
+    // and skips what is not a preset), written and deleted by file name.
+    private fun servePresets(method: String, uri: Uri, body: ByteArray): HkpResponse {
+        val fileName = decode(normalizedPath(uri.path ?: ""))
+        return when {
+            method == "GET" && fileName.isEmpty() ->
+                HkpResponse.json(
+                    200,
+                    JSONArray(
+                        presetStore.listFiles().map {
+                            JSONObject(mapOf("file" to it.file, "source" to it.source))
+                        },
+                    ).toString(),
+                )
+            method == "POST" && fileName.isNotEmpty() -> {
+                if (body.isEmpty()) return HkpResponse.json(400, jsonError("Missing preset payload"))
+                presetStore.write(fileName, body)
+                HkpResponse.json(200, JSONObject(mapOf("file" to fileName)).toString())
+            }
+            method == "DELETE" && fileName.isNotEmpty() -> {
+                presetStore.delete(fileName)
+                HkpResponse.json(200, JSONObject(mapOf("file" to fileName)).toString())
+            }
+            else -> HkpResponse.json(405, jsonError("Unsupported presets request"))
         }
     }
 

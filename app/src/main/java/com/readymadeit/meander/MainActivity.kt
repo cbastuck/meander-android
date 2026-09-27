@@ -288,6 +288,9 @@ class MainActivity : Activity() {
             "woff2" -> "font/woff2"
             "png" -> "image/png"
             "jpg", "jpeg" -> "image/jpeg"
+            // WebAssembly compiles while it streams in only when served as
+            // what it is; otherwise the page falls back to a slower copy.
+            "wasm" -> "application/wasm"
             else -> "application/octet-stream"
         }
 
