@@ -6,14 +6,16 @@ import com.readymadeit.meander.R
 import com.readymadeit.meander.runtime.RuntimeHost
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URLDecoder
 
 class HkpSchemeRouter(
     private val context: Context,
     private val runtimeHost: RuntimeHost,
 ) {
     private val boardStore = BoardStore(context)
+    private val historyStore = BoardHistoryStore(context)
+    private val startPageFile = java.io.File(context.filesDir, "startpage.json")
     private val presetStore = PresetStore(context)
+    private val homeScreenPins = HomeScreenPins(context)
     private val remoteName = context.getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" }
     private val remoteRuntime = RemoteRuntimeBridge(remoteName)
 
@@ -31,18 +33,23 @@ class HkpSchemeRouter(
         return try {
             when (uri.host) {
                 "boards" -> serveBoards(method, uri, request.body)
+                "history" -> serveHistory(method, uri, request.body)
+                "startpage" -> serveStartPage(method, request.body)
                 "presets" -> servePresets(method, uri, request.body)
                 "remotes" -> serveRemotes(method, uri, request.headers, request.body)
                 "settings" -> serveSettings(method, request.body)
+                "home-screen" -> serveHomeScreen(method, uri, request.body)
                 else -> HkpResponse.json(404, jsonError("Unknown route: ${request.url}"))
             }.withApiHeaders()
+        } catch (error: NoSuchElementException) {
+            HkpResponse.json(404, jsonError(error.message ?: "Not found")).withApiHeaders()
         } catch (error: Exception) {
             HkpResponse.json(500, jsonError(error.message ?: "Request failed")).withApiHeaders()
         }
     }
 
     private fun serveBoards(method: String, uri: Uri, body: ByteArray): HkpResponse {
-        val boardName = decode(normalizedPath(uri.path ?: ""))
+        val boardName = pathName(uri)
         // "?meta=1" asks for the listing as objects carrying each board's
         // last-write time instead of bare names.
         val wantsMetadata = uri.getQueryParameter("meta")?.let { it != "0" } ?: false
@@ -73,10 +80,50 @@ class HkpSchemeRouter(
         }
     }
 
+    // A board's history, kept with the boards (see BoardHistoryStore):
+    //   GET history/ · GET, POST, DELETE history/<board>
+    private fun serveHistory(method: String, uri: Uri, body: ByteArray): HkpResponse {
+        val boardName = pathName(uri)
+        return when {
+            method == "GET" && boardName.isEmpty() -> HkpResponse.json(200, historyStore.summaries().toString())
+            method == "GET" -> HkpResponse.json(200, historyStore.load(boardName))
+            method == "POST" && BoardFileName.isValid(boardName) -> {
+                if (body.isEmpty()) return HkpResponse.json(400, jsonError("Missing history entry"))
+                historyStore.push(boardName, body)
+                HkpResponse.json(201, JSONObject(mapOf("ok" to true)).toString())
+            }
+            method == "DELETE" && boardName.isNotEmpty() -> {
+                historyStore.clear(boardName)
+                HkpResponse.json(200, JSONObject(mapOf("ok" to true)).toString())
+            }
+            else -> HkpResponse.json(405, jsonError("Unsupported history request"))
+        }
+    }
+
+    // The board finder's folder tree.
+    private fun serveStartPage(method: String, body: ByteArray): HkpResponse =
+        when (method) {
+            "GET" ->
+                if (startPageFile.exists()) {
+                    HkpResponse(200, "application/json", body = startPageFile.readBytes())
+                } else {
+                    HkpResponse.json(404, jsonError("No folder tree yet"))
+                }
+            "POST" -> {
+                if (body.isEmpty()) {
+                    HkpResponse.json(400, jsonError("Missing folder tree"))
+                } else {
+                    startPageFile.writeBytes(body)
+                    HkpResponse.json(200, JSONObject(mapOf("ok" to true)).toString())
+                }
+            }
+            else -> HkpResponse.json(405, jsonError("Unsupported startpage request"))
+        }
+
     // The preset library: every file listed unparsed (the web app reads them
     // and skips what is not a preset), written and deleted by file name.
     private fun servePresets(method: String, uri: Uri, body: ByteArray): HkpResponse {
-        val fileName = decode(normalizedPath(uri.path ?: ""))
+        val fileName = pathName(uri)
         return when {
             method == "GET" && fileName.isEmpty() ->
                 HkpResponse.json(
@@ -153,6 +200,53 @@ class HkpSchemeRouter(
         }
     }
 
+    // Boards pinned to the Home Screen (hkp://home-screen/…):
+    //   GET    pins               the pinned list, newest first
+    //   POST   pins               pin { kind, id, title } and ask the launcher
+    //                             to place its icon ("requested"), or say the
+    //                             launcher cannot ("manual")
+    //   DELETE pins/<kind>/<id>   unpin
+    //   POST   launch             take the board a shortcut asked to open, once
+    private fun serveHomeScreen(method: String, uri: Uri, body: ByteArray): HkpResponse {
+        val segments = uri.pathSegments
+        fun pinsJson(pins: List<HomeScreenPin>) = JSONArray(pins.map { it.toJson() })
+
+        return when {
+            method == "GET" && segments == listOf("pins") ->
+                HkpResponse.json(200, JSONObject(mapOf("pins" to pinsJson(homeScreenPins.list()))).toString())
+            method == "POST" && segments == listOf("pins") -> {
+                if (body.isEmpty()) return HkpResponse.json(400, jsonError("A pin needs a kind and an id"))
+                val payload = JSONObject(String(body, Charsets.UTF_8))
+                val id = payload.optString("id")
+                val pin = HomeScreenPin(
+                    kind = payload.optString("kind"),
+                    id = id,
+                    title = payload.optString("title").ifEmpty { id },
+                )
+                val pins = try {
+                    homeScreenPins.add(pin)
+                } catch (error: IllegalArgumentException) {
+                    return HkpResponse.json(400, jsonError(error.message ?: "Invalid pin"))
+                }
+                val placement = if (homeScreenPins.requestOnHomeScreen(pin)) "requested" else "manual"
+                HkpResponse.json(
+                    200,
+                    JSONObject(mapOf("pins" to pinsJson(pins), "homeScreen" to placement)).toString(),
+                )
+            }
+            method == "DELETE" && segments.size == 3 && segments[0] == "pins" ->
+                HkpResponse.json(
+                    200,
+                    JSONObject(mapOf("pins" to pinsJson(homeScreenPins.remove(segments[1], segments[2])))).toString(),
+                )
+            method == "POST" && segments == listOf("launch") -> {
+                val target = LaunchInbox.take()?.let { (kind, id) -> JSONObject(mapOf("kind" to kind, "id" to id)) }
+                HkpResponse.json(200, JSONObject().put("target", target ?: JSONObject.NULL).toString())
+            }
+            else -> HkpResponse.json(404, jsonError("Unknown home-screen request: $method ${uri.path}"))
+        }
+    }
+
     private fun HkpResponse.withApiHeaders(): HkpResponse = copy(headers = apiHeaders() + headers)
 
     private fun apiHeaders(): Map<String, String> = mapOf(
@@ -163,7 +257,9 @@ class HkpSchemeRouter(
 
     private fun normalizedPath(path: String): String = path.trim('/')
 
-    private fun decode(value: String): String = URLDecoder.decode(value, Charsets.UTF_8.name())
+    /** The name a path carries, decoded once: `Uri.getPath` has decoded it already,
+     *  and decoding that again turns a name's own "%" or "+" into something else. */
+    private fun pathName(uri: Uri): String = Uri.decode(normalizedPath(uri.encodedPath ?: ""))
 
     private fun jsonError(message: String): String =
         JSONObject(mapOf("error" to message)).toString()

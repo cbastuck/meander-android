@@ -20,6 +20,8 @@ import android.webkit.WebViewClient
 import com.readymadeit.meander.auth.AuthSessionBridge
 import com.readymadeit.meander.bridge.HkpJavascriptBridge
 import com.readymadeit.meander.bridge.HkpSchemeRouter
+import com.readymadeit.meander.bridge.HomeScreenPins
+import com.readymadeit.meander.bridge.LaunchInbox
 import com.readymadeit.meander.bridge.NativeAuthJavascriptBridge
 import com.readymadeit.meander.bridge.RuntimeAuthJavascriptBridge
 import com.readymadeit.meander.runtime.RuntimeHost
@@ -88,6 +90,14 @@ class MainActivity : Activity() {
 
     private fun handleIntent(intent: Intent?) {
         val uri = intent?.data ?: return
+        // A pinned board's shortcut: kept until the web app takes it. The page
+        // is told one is waiting; on a cold start it is not there yet, and it
+        // takes the board as it mounts instead.
+        HomeScreenPins.target(uri)?.let { (kind, id) ->
+            LaunchInbox.offer(kind, id)
+            webView.evaluateJavascript("window.__readymadeOnLaunch && window.__readymadeOnLaunch();", null)
+            return
+        }
         if (authBridge.handleRedirect(uri)) {
             Log.i(TAG, "Handled auth redirect")
         }
