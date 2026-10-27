@@ -16,6 +16,8 @@ class HkpSchemeRouter(
     private val startPageFile = java.io.File(context.filesDir, "startpage.json")
     private val presetStore = PresetStore(context)
     private val homeScreenPins = HomeScreenPins(context)
+    private val vault = DeviceVault(context)
+    private val grants = SecretGrants(context)
     private val remoteName = context.getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" }
     private val remoteRuntime = RemoteRuntimeBridge(remoteName)
 
@@ -39,6 +41,7 @@ class HkpSchemeRouter(
                 "remotes" -> serveRemotes(method, uri, request.headers, request.body)
                 "settings" -> serveSettings(method, request.body)
                 "home-screen" -> serveHomeScreen(method, uri, request.body)
+                "secrets" -> serveSecrets(method, uri, request.headers, request.body)
                 else -> HkpResponse.json(404, jsonError("Unknown route: ${request.url}"))
             }.withApiHeaders()
         } catch (error: NoSuchElementException) {
@@ -247,12 +250,90 @@ class HkpSchemeRouter(
         }
     }
 
+    /** The vault and the grants as the app's page is given them (SecretsPage). */
+    fun secretsScript(): String = SecretsPage.script(vault, grants)
+
+    // Secrets (hkp://secrets/…), for the app's own page only (see SecretsPage).
+    // Names and audiences come back; a value never does — the page already has
+    // every value, from the injection, and a settings view has no reason to
+    // show one.
+    //   GET    values            alias -> hosts it may be sent to
+    //   POST   values/<alias>    { value?, audience? }: whichever is given is
+    //                            set, the other is left as it was
+    //   DELETE values/<alias>
+    //   POST   grants            { key, aliases }: merged into what was granted
+    //   DELETE grants            { key }
+    private fun serveSecrets(method: String, uri: Uri, headers: Map<String, String>, body: ByteArray): HkpResponse {
+        val presented = headers.entries.firstOrNull { it.key.equals(SecretsPage.TOKEN_HEADER, ignoreCase = true) }?.value
+        if (presented != SecretsPage.token) {
+            return HkpResponse.json(403, jsonError("Secrets are kept for the app's own page"))
+        }
+        // An alias is limited to what a reference can express, so the decoded
+        // segments are the names as written.
+        val segments = uri.pathSegments
+        val payload = if (body.isEmpty()) JSONObject() else JSONObject(String(body, Charsets.UTF_8))
+        fun names(array: JSONArray?): List<String>? =
+            array?.let { (0 until it.length()).map { index -> it.optString(index) }.filter { name -> name.isNotEmpty() } }
+
+        return when {
+            method == "GET" && segments == listOf("values") -> {
+                val audiences = JSONObject()
+                vault.all().forEach { (alias, entry) -> audiences.put(alias, JSONArray(entry.audience)) }
+                HkpResponse.json(200, audiences.toString())
+            }
+            method == "POST" && segments.size == 2 && segments[0] == "values" -> {
+                val alias = segments[1]
+                if (!ALIAS.matches(alias)) {
+                    return HkpResponse.json(400, jsonError("Use letters, digits, dots, hyphens and underscores only"))
+                }
+                val value = if (payload.has("value")) payload.optString("value") else null
+                val audience = names(payload.optJSONArray("audience"))
+                if (value == null && audience == null) {
+                    return HkpResponse.json(400, jsonError("Nothing to set: give a value, an audience or both"))
+                }
+                if (value != null) {
+                    if (value.isEmpty()) {
+                        return HkpResponse.json(400, jsonError("A secret with no value is the same as not having one"))
+                    }
+                    vault.setValue(alias, value)
+                }
+                if (audience != null && !vault.setAudience(alias, audience)) {
+                    return HkpResponse.json(404, jsonError("No secret called $alias"))
+                }
+                HkpResponse.json(200, JSONObject(mapOf("saved" to alias)).toString())
+            }
+            method == "DELETE" && segments.size == 2 && segments[0] == "values" -> {
+                // Gone either way, which is what was asked for.
+                vault.delete(segments[1])
+                HkpResponse.json(200, JSONObject(mapOf("deleted" to segments[1])).toString())
+            }
+            method == "POST" && segments == listOf("grants") -> {
+                val key = payload.optString("key")
+                val aliases = names(payload.optJSONArray("aliases"))
+                if (key.isEmpty() || aliases == null) {
+                    return HkpResponse.json(400, jsonError("A grant needs a key and aliases"))
+                }
+                grants.grant(key, aliases)
+                HkpResponse.json(200, JSONObject(mapOf("granted" to key)).toString())
+            }
+            method == "DELETE" && segments == listOf("grants") -> {
+                val key = payload.optString("key")
+                if (key.isEmpty()) {
+                    return HkpResponse.json(400, jsonError("Which grant? Give its key"))
+                }
+                grants.revoke(key)
+                HkpResponse.json(200, JSONObject(mapOf("revoked" to key)).toString())
+            }
+            else -> HkpResponse.json(404, jsonError("Unknown secrets request: $method ${uri.path}"))
+        }
+    }
+
     private fun HkpResponse.withApiHeaders(): HkpResponse = copy(headers = apiHeaders() + headers)
 
     private fun apiHeaders(): Map<String, String> = mapOf(
         "Access-Control-Allow-Origin" to "*",
         "Access-Control-Allow-Methods" to "GET, POST, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers" to "Content-Type, Authorization",
+        "Access-Control-Allow-Headers" to "Content-Type, Authorization, ${SecretsPage.TOKEN_HEADER}",
     )
 
     private fun normalizedPath(path: String): String = path.trim('/')
@@ -265,4 +346,8 @@ class HkpSchemeRouter(
         JSONObject(mapOf("error" to message)).toString()
 
     private fun String.trim(char: Char): String = trim { it == char }
+
+    companion object {
+        private val ALIAS = Regex("^[A-Za-z0-9_.-]+$")
+    }
 }

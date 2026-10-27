@@ -33,12 +33,13 @@ import java.net.URL
 class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var authBridge: AuthSessionBridge
+    private lateinit var router: HkpSchemeRouter
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val runtimeHost = RuntimeHost(applicationContext)
-        val router = HkpSchemeRouter(applicationContext, runtimeHost)
+        router = HkpSchemeRouter(applicationContext, runtimeHost)
         authBridge = AuthSessionBridge(this, packageName)
 
         // Bring up the embedded hkp-rt runtime in a foreground service so it (and
@@ -168,7 +169,9 @@ class MainActivity : Activity() {
         val responseData = if (relativePath == "index.html") injectBridge(data) else data
         val headers = mapOf(
             "Access-Control-Allow-Origin" to "*",
-            "Cache-Control" to if (BuildConfig.DEBUG) "no-store" else "public, max-age=31536000",
+            // The page carries the vault, written into it as it is served: it
+            // is never kept, so each load reads what is held now.
+            "Cache-Control" to if (BuildConfig.DEBUG || relativePath == "index.html") "no-store" else "public, max-age=31536000",
         )
         return WebResourceResponse(
             mimeType(relativePath),
@@ -216,6 +219,7 @@ class MainActivity : Activity() {
         return """
             (() => {
               window.__MEANDER_ANDROID__ = true;
+              ${router.secretsScript()}
               window.__MEANDER_CONFIG__ = Object.assign(window.__MEANDER_CONFIG__ || {}, {
                 runtimeBaseURL: "hkp://remotes/" + $remoteName
               });
