@@ -19,6 +19,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import com.readymadeit.meander.auth.AuthSessionBridge
+import com.readymadeit.meander.bridge.BridgeToken
 import com.readymadeit.meander.bridge.HkpJavascriptBridge
 import com.readymadeit.meander.bridge.HkpSchemeRouter
 import com.readymadeit.meander.bridge.HomeScreenPins
@@ -236,10 +237,10 @@ class MainActivity : Activity() {
 
         val data = assets.open("WebApp/$relativePath").use { it.readBytes() }
         val isPage = relativePath == "index.html"
-        // The vault goes only into the app's own top-level page, as the iOS
-        // shell's main-frame-only script does: a frame, or a fetch from any
-        // page, gets the page without it.
-        val responseData = if (isPage) injectBridge(data, withSecrets = forMainFrame) else data
+        // The vault and the bridge token go only into the app's own top-level
+        // page, as the iOS shell's main-frame-only script does: a frame, or a
+        // fetch from any page, gets the page without them.
+        val responseData = if (isPage) injectBridge(data, forMainFrame) else data
         val headers = buildMap {
             // The page is never readable from another origin; the assets
             // carry nothing private and stay open to CORS requests.
@@ -267,7 +268,7 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val html = URL(devUrl).openStream().use { it.readBytes() }
-                val injected = String(injectBridge(html, withSecrets = true), Charsets.UTF_8)
+                val injected = String(injectBridge(html, forMainFrame = true), Charsets.UTF_8)
                 runOnUiThread {
                     webView.loadDataWithBaseURL(devUrl, injected, "text/html", "utf-8", null)
                 }
@@ -278,10 +279,10 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun injectBridge(htmlBytes: ByteArray, withSecrets: Boolean): ByteArray {
+    private fun injectBridge(htmlBytes: ByteArray, forMainFrame: Boolean): ByteArray {
         val html = String(htmlBytes, Charsets.UTF_8)
         val marker = "</head>"
-        val injected = "<script>${bridgeScript(withSecrets)}</script>"
+        val injected = "<script>${bridgeScript(forMainFrame)}</script>"
         return if (html.contains(marker, ignoreCase = true)) {
             html.replace(marker, "$injected$marker", ignoreCase = true)
         } else {
@@ -289,10 +290,15 @@ class MainActivity : Activity() {
         }.toByteArray(Charsets.UTF_8)
     }
 
-    private fun bridgeScript(withSecrets: Boolean): String {
+    private fun bridgeScript(forMainFrame: Boolean): String {
         val remoteName = jsLiteral(getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" })
+        // A frame gets no token, so the native bridges refuse it (BridgeToken).
+        val bridgeToken = jsLiteral(if (forMainFrame) BridgeToken.value else "")
         return """
             (() => {
+              // Kept in this closure, not on window: only the shims below
+              // present it, and a frame cannot reach it through the parent.
+              const bridgeToken = $bridgeToken;
               window.__MEANDER_ANDROID__ = true;
               // The sink a share is delivered to (deliverPendingShares), as on
               // iOS: one that arrives before React mounts waits on the queue,
@@ -304,7 +310,7 @@ class MainActivity : Activity() {
                   if (window.__readymadeOnShare) { window.__readymadeOnShare(env); }
                 } catch (e) {}
               };
-              ${if (withSecrets) router.secretsScript() else ""}
+              ${if (forMainFrame) router.secretsScript() else ""}
               window.__MEANDER_CONFIG__ = Object.assign(window.__MEANDER_CONFIG__ || {}, {
                 runtimeBaseURL: "hkp://remotes/" + $remoteName
               });
@@ -349,7 +355,7 @@ class MainActivity : Activity() {
                 const method = (init.method || request?.method || "GET").toUpperCase();
                 const headers = headersObject(init.headers || request?.headers);
                 const body = init.body ?? (request && method !== "GET" && method !== "HEAD" ? await request.arrayBuffer() : null);
-                const raw = AndroidHkpBridge.fetch(JSON.stringify({
+                const raw = AndroidHkpBridge.fetch(bridgeToken, JSON.stringify({
                   url: String(url),
                   method,
                   headers,
@@ -363,10 +369,10 @@ class MainActivity : Activity() {
                 });
               };
               window.hkpAuth = {
-                postMessage: async (body) => JSON.parse(AndroidAuthBridge.postMessage(JSON.stringify(body || {})))
+                postMessage: async (body) => JSON.parse(AndroidAuthBridge.postMessage(bridgeToken, JSON.stringify(body || {})))
               };
               window.hkpRuntimeAuth = {
-                postMessage: (body) => AndroidRuntimeAuthBridge.postMessage(JSON.stringify(body || {}))
+                postMessage: (body) => AndroidRuntimeAuthBridge.postMessage(bridgeToken, JSON.stringify(body || {}))
               };
               console.log("Android HKP bridge installed @ " + location.href);
             })();

@@ -26,6 +26,8 @@ import java.util.UUID
  */
 class ShareInbox(context: Context) {
     private val dir = File(context.filesDir, "share-inbox")
+    private val packageName = context.packageName
+    private val packageManager = context.packageManager
 
     /** All pending items, oldest first. */
     fun pending(): List<JSONObject> =
@@ -165,9 +167,29 @@ class ShareInbox(context: Context) {
             }
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
-    /** The shared files: EXTRA_STREAM, or the clip data some apps use alone. */
+    /**
+     * The shared files: EXTRA_STREAM, or the clip data some apps use alone.
+     * Only those another app hands over (isForeign); the rest are dropped.
+     */
+    private fun streamsOf(intent: Intent): List<Uri> = sharedUris(intent).filter(::isForeign)
+
+    /**
+     * Whether `uri` is something another app holds and granted: a content URI
+     * of a provider that is not this app's. Any app can send a share, and
+     * what is shared is read with this app's own rights, so a file URI or one
+     * of this app's providers would have it copy its private files — the
+     * board library, the history, the grants — into a board that may send
+     * them anywhere.
+     */
     @Suppress("DEPRECATION")
-    private fun streamsOf(intent: Intent): List<Uri> {
+    private fun isForeign(uri: Uri): Boolean {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return false
+        val authority = uri.authority ?: return false
+        return packageManager.resolveContentProvider(authority, 0)?.packageName != packageName
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sharedUris(intent: Intent): List<Uri> {
         val extra: List<Uri> = when (intent.action) {
             Intent.ACTION_SEND_MULTIPLE ->
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
