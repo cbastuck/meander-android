@@ -138,7 +138,7 @@ class MainActivity : Activity() {
                     return null
                 }
                 return try {
-                    serveAppAsset(uri)
+                    serveAppAsset(uri, request.isForMainFrame)
                 } catch (error: Exception) {
                     Log.e(TAG, "Failed to serve ${uri}", error)
                     WebResourceResponse(
@@ -154,7 +154,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun serveAppAsset(uri: Uri): WebResourceResponse {
+    private fun serveAppAsset(uri: Uri, forMainFrame: Boolean): WebResourceResponse {
         val path = normalizedAssetPath(uri.path ?: "")
         val relativePath = when {
             path.isEmpty() || path == "index.html" -> "index.html"
@@ -166,13 +166,19 @@ class MainActivity : Activity() {
         }
 
         val data = assets.open("WebApp/$relativePath").use { it.readBytes() }
-        val responseData = if (relativePath == "index.html") injectBridge(data) else data
-        val headers = mapOf(
-            "Access-Control-Allow-Origin" to "*",
+        val isPage = relativePath == "index.html"
+        // The vault goes only into the app's own top-level page, as the iOS
+        // shell's main-frame-only script does: a frame, or a fetch from any
+        // page, gets the page without it.
+        val responseData = if (isPage) injectBridge(data, withSecrets = forMainFrame) else data
+        val headers = buildMap {
+            // The page is never readable from another origin; the assets
+            // carry nothing private and stay open to CORS requests.
+            if (!isPage) put("Access-Control-Allow-Origin", "*")
             // The page carries the vault, written into it as it is served: it
             // is never kept, so each load reads what is held now.
-            "Cache-Control" to if (BuildConfig.DEBUG || relativePath == "index.html") "no-store" else "public, max-age=31536000",
-        )
+            put("Cache-Control", if (BuildConfig.DEBUG || isPage) "no-store" else "public, max-age=31536000")
+        }
         return WebResourceResponse(
             mimeType(relativePath),
             "utf-8",
@@ -192,7 +198,7 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val html = URL(devUrl).openStream().use { it.readBytes() }
-                val injected = String(injectBridge(html), Charsets.UTF_8)
+                val injected = String(injectBridge(html, withSecrets = true), Charsets.UTF_8)
                 runOnUiThread {
                     webView.loadDataWithBaseURL(devUrl, injected, "text/html", "utf-8", null)
                 }
@@ -203,10 +209,10 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun injectBridge(htmlBytes: ByteArray): ByteArray {
+    private fun injectBridge(htmlBytes: ByteArray, withSecrets: Boolean): ByteArray {
         val html = String(htmlBytes, Charsets.UTF_8)
         val marker = "</head>"
-        val injected = "<script>${bridgeScript()}</script>"
+        val injected = "<script>${bridgeScript(withSecrets)}</script>"
         return if (html.contains(marker, ignoreCase = true)) {
             html.replace(marker, "$injected$marker", ignoreCase = true)
         } else {
@@ -214,12 +220,12 @@ class MainActivity : Activity() {
         }.toByteArray(Charsets.UTF_8)
     }
 
-    private fun bridgeScript(): String {
+    private fun bridgeScript(withSecrets: Boolean): String {
         val remoteName = jsLiteral(getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" })
         return """
             (() => {
               window.__MEANDER_ANDROID__ = true;
-              ${router.secretsScript()}
+              ${if (withSecrets) router.secretsScript() else ""}
               window.__MEANDER_CONFIG__ = Object.assign(window.__MEANDER_CONFIG__ || {}, {
                 runtimeBaseURL: "hkp://remotes/" + $remoteName
               });

@@ -52,6 +52,10 @@ class HomeScreenPins(private val context: Context) {
     fun add(pin: HomeScreenPin): List<HomeScreenPin> {
         require(pin.kind in KINDS && pin.id.isNotEmpty()) { "Only a saved board or a demo can be pinned" }
         val pins = listOf(pin) + list().filterNot { it.kind == pin.kind && it.id == pin.id }
+        // A board pinned, unpinned and pinned again has a disabled shortcut
+        // left. Enabled first, so write() publishes it as a live shortcut in
+        // the long-press menu and the icon already placed works again.
+        shortcuts?.enableShortcuts(listOf(pin.shortcutId))
         write(pins)
         return pins
     }
@@ -75,8 +79,6 @@ class HomeScreenPins(private val context: Context) {
         if (!manager.isRequestPinShortcutSupported) {
             return false
         }
-        // A board pinned, unpinned and pinned again has a disabled icon left.
-        manager.enableShortcuts(listOf(pin.shortcutId))
         return manager.requestPinShortcut(shortcutFor(pin), null)
     }
 
