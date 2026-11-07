@@ -4,4 +4,5 @@
     <string name="hkp_runtime_base_url">http://127.0.0.1:5556</string>
     <string name="dev_webapp_url"></string>
     <string name="home_screen_unpinned">This board was unpinned in Readymade</string>
+    <string name="share_too_large">Readymade accepts shared files up to %1$s</string>
 </resources>

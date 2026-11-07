@@ -16,6 +16,7 @@ class HkpSchemeRouter(
     private val startPageFile = java.io.File(context.filesDir, "startpage.json")
     private val presetStore = PresetStore(context)
     private val homeScreenPins = HomeScreenPins(context)
+    private val shareInbox = ShareInbox(context)
     private val vault = DeviceVault(context)
     private val grants = SecretGrants(context)
     private val remoteName = context.getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" }
@@ -42,6 +43,7 @@ class HkpSchemeRouter(
                 "settings" -> serveSettings(method, request.body)
                 "home-screen" -> serveHomeScreen(method, uri, request.body)
                 "secrets" -> serveSecrets(method, uri, request.headers, request.body)
+                "share-files" -> serveShareFiles(method, uri)
                 else -> HkpResponse.json(404, jsonError("Unknown route: ${request.url}"))
             }.withApiHeaders()
         } catch (error: NoSuchElementException) {
@@ -247,6 +249,26 @@ class HkpSchemeRouter(
                 HkpResponse.json(200, JSONObject().put("target", target ?: JSONObject.NULL).toString())
             }
             else -> HkpResponse.json(404, jsonError("Unknown home-screen request: $method ${uri.path}"))
+        }
+    }
+
+    // Binary payloads of shared items (hkp://share-files/<id>), as on iOS: the
+    // page fetches one as it injects the share into a board (GET) and
+    // releases it once the board has it (DELETE). See ShareInbox.
+    private fun serveShareFiles(method: String, uri: Uri): HkpResponse {
+        val id = pathName(uri)
+        if (!ShareInbox.isValidId(id)) {
+            return HkpResponse.json(400, jsonError("Missing share file id"))
+        }
+        return when (method) {
+            "GET" ->
+                shareInbox.readPayload(id)?.let { HkpResponse(200, "application/octet-stream", body = it) }
+                    ?: HkpResponse.json(404, jsonError("Unknown share file: $id"))
+            "DELETE" -> {
+                shareInbox.removePayload(id)
+                HkpResponse.json(200, JSONObject(mapOf("deleted" to id)).toString())
+            }
+            else -> HkpResponse.json(405, jsonError("Unsupported share-files request"))
         }
     }
 

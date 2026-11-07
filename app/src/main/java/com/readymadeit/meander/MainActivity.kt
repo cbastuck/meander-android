@@ -17,6 +17,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import com.readymadeit.meander.auth.AuthSessionBridge
 import com.readymadeit.meander.bridge.HkpJavascriptBridge
 import com.readymadeit.meander.bridge.HkpSchemeRouter
@@ -24,6 +25,7 @@ import com.readymadeit.meander.bridge.HomeScreenPins
 import com.readymadeit.meander.bridge.LaunchInbox
 import com.readymadeit.meander.bridge.NativeAuthJavascriptBridge
 import com.readymadeit.meander.bridge.RuntimeAuthJavascriptBridge
+import com.readymadeit.meander.bridge.ShareInbox
 import com.readymadeit.meander.runtime.RuntimeHost
 import com.readymadeit.meander.runtime.RuntimeService
 import java.io.ByteArrayInputStream
@@ -34,12 +36,20 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var authBridge: AuthSessionBridge
     private lateinit var router: HkpSchemeRouter
+    private lateinit var shareInbox: ShareInbox
+
+    // Set once the page has loaded, when the share sink it was given exists.
+    private var webAppReady = false
+    // Shares handed to the page whose delivery has not come back yet, so a
+    // second drain while one runs does not deliver them twice.
+    private val deliveringShares = mutableSetOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val runtimeHost = RuntimeHost(applicationContext)
         router = HkpSchemeRouter(applicationContext, runtimeHost)
+        shareInbox = ShareInbox(applicationContext)
         authBridge = AuthSessionBridge(this, packageName)
 
         // Bring up the embedded hkp-rt runtime in a foreground service so it (and
@@ -54,7 +64,13 @@ class MainActivity : Activity() {
         )
 
         configureWebView(webView, router, runtimeHost)
-        handleIntent(intent)
+        // A recreated activity is handed the intent it was started with again;
+        // a share in it was already taken into the inbox the first time.
+        val relaunched = savedInstanceState != null ||
+            (intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        if (!(relaunched && ShareInbox.isShare(intent))) {
+            handleIntent(intent)
+        }
         requestRuntimePermissions()
 
         val devUrl = getString(R.string.dev_webapp_url)
@@ -90,6 +106,10 @@ class MainActivity : Activity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        if (ShareInbox.isShare(intent)) {
+            receiveShare(intent!!)
+            return
+        }
         val uri = intent?.data ?: return
         // A pinned board's shortcut: kept until the web app takes it. The page
         // is told one is waiting; on a cold start it is not there yet, and it
@@ -101,6 +121,48 @@ class MainActivity : Activity() {
         }
         if (authBridge.handleRedirect(uri)) {
             Log.i(TAG, "Handled auth redirect")
+        }
+    }
+
+    // Share → Readymade from another app. The bytes are copied off the main
+    // thread; the share is then handed to the page, whose in-app picker asks
+    // for the board.
+    private fun receiveShare(intent: Intent) {
+        Thread {
+            val received = try {
+                shareInbox.receive(intent, contentResolver)
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to receive a share", error)
+                ShareInbox.Received(stored = 0, tooLarge = 0)
+            }
+            runOnUiThread {
+                if (received.tooLarge > 0) {
+                    val limit = "${ShareInbox.MAX_PAYLOAD_BYTES / (1024 * 1024)} MB"
+                    Toast.makeText(this, getString(R.string.share_too_large, limit), Toast.LENGTH_LONG).show()
+                }
+                deliverPendingShares()
+            }
+        }.start()
+    }
+
+    // Drains the inbox into the page. An item is removed only once the page's
+    // sink took it, so one that arrives before the page has loaded waits for
+    // onPageFinished.
+    private fun deliverPendingShares() {
+        shareInbox.sweepStalePayloads()
+        if (!webAppReady) return
+        for (item in shareInbox.pending()) {
+            val id = item.optString("id")
+            if (!deliveringShares.add(id)) continue
+            val js = "window.__readymadeDeliverShare ? (window.__readymadeDeliverShare($item), true) : false"
+            webView.evaluateJavascript(js) { result ->
+                deliveringShares.remove(id)
+                if (result == "true") {
+                    shareInbox.remove(id)
+                } else {
+                    Log.w(TAG, "Share $id not delivered: the page has no share sink")
+                }
+            }
         }
     }
 
@@ -129,6 +191,13 @@ class MainActivity : Activity() {
             }
         }
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String) {
+                // The page and its share sink are live: deliver what was
+                // shared before it was (a cold start from the share sheet).
+                webAppReady = true
+                deliverPendingShares()
+            }
+
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 val uri = request.url
                 // The bundled app must be served from an http(s) origin: Chromium
@@ -225,6 +294,16 @@ class MainActivity : Activity() {
         return """
             (() => {
               window.__MEANDER_ANDROID__ = true;
+              // The sink a share is delivered to (deliverPendingShares), as on
+              // iOS: one that arrives before React mounts waits on the queue,
+              // later ones call the app's handler directly.
+              window.__READYMADE_SHARES__ = window.__READYMADE_SHARES__ || [];
+              window.__readymadeDeliverShare = function (env) {
+                try {
+                  window.__READYMADE_SHARES__.push(env);
+                  if (window.__readymadeOnShare) { window.__readymadeOnShare(env); }
+                } catch (e) {}
+              };
               ${if (withSecrets) router.secretsScript() else ""}
               window.__MEANDER_CONFIG__ = Object.assign(window.__MEANDER_CONFIG__ || {}, {
                 runtimeBaseURL: "hkp://remotes/" + $remoteName
