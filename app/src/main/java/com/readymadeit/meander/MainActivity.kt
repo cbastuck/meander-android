@@ -17,11 +17,16 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import com.readymadeit.meander.auth.AuthSessionBridge
+import com.readymadeit.meander.bridge.BridgeToken
 import com.readymadeit.meander.bridge.HkpJavascriptBridge
 import com.readymadeit.meander.bridge.HkpSchemeRouter
+import com.readymadeit.meander.bridge.HomeScreenPins
+import com.readymadeit.meander.bridge.LaunchInbox
 import com.readymadeit.meander.bridge.NativeAuthJavascriptBridge
 import com.readymadeit.meander.bridge.RuntimeAuthJavascriptBridge
+import com.readymadeit.meander.bridge.ShareInbox
 import com.readymadeit.meander.runtime.RuntimeHost
 import com.readymadeit.meander.runtime.RuntimeService
 import java.io.ByteArrayInputStream
@@ -31,12 +36,21 @@ import java.net.URL
 class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var authBridge: AuthSessionBridge
+    private lateinit var router: HkpSchemeRouter
+    private lateinit var shareInbox: ShareInbox
+
+    // Set once the page has loaded, when the share sink it was given exists.
+    private var webAppReady = false
+    // Shares handed to the page whose delivery has not come back yet, so a
+    // second drain while one runs does not deliver them twice.
+    private val deliveringShares = mutableSetOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val runtimeHost = RuntimeHost(applicationContext)
-        val router = HkpSchemeRouter(applicationContext, runtimeHost)
+        router = HkpSchemeRouter(applicationContext, runtimeHost)
+        shareInbox = ShareInbox(applicationContext)
         authBridge = AuthSessionBridge(this, packageName)
 
         // Bring up the embedded hkp-rt runtime in a foreground service so it (and
@@ -51,7 +65,13 @@ class MainActivity : Activity() {
         )
 
         configureWebView(webView, router, runtimeHost)
-        handleIntent(intent)
+        // A recreated activity is handed the intent it was started with again;
+        // a share in it was already taken into the inbox the first time.
+        val relaunched = savedInstanceState != null ||
+            (intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        if (!(relaunched && ShareInbox.isShare(intent))) {
+            handleIntent(intent)
+        }
         requestRuntimePermissions()
 
         val devUrl = getString(R.string.dev_webapp_url)
@@ -87,9 +107,63 @@ class MainActivity : Activity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        if (ShareInbox.isShare(intent)) {
+            receiveShare(intent!!)
+            return
+        }
         val uri = intent?.data ?: return
+        // A pinned board's shortcut: kept until the web app takes it. The page
+        // is told one is waiting; on a cold start it is not there yet, and it
+        // takes the board as it mounts instead.
+        HomeScreenPins.target(uri)?.let { (kind, id) ->
+            LaunchInbox.offer(kind, id)
+            webView.evaluateJavascript("window.__readymadeOnLaunch && window.__readymadeOnLaunch();", null)
+            return
+        }
         if (authBridge.handleRedirect(uri)) {
             Log.i(TAG, "Handled auth redirect")
+        }
+    }
+
+    // Share → Readymade from another app. The bytes are copied off the main
+    // thread; the share is then handed to the page, whose in-app picker asks
+    // for the board.
+    private fun receiveShare(intent: Intent) {
+        Thread {
+            val received = try {
+                shareInbox.receive(intent, contentResolver)
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to receive a share", error)
+                ShareInbox.Received(stored = 0, tooLarge = 0)
+            }
+            runOnUiThread {
+                if (received.tooLarge > 0) {
+                    val limit = "${ShareInbox.MAX_PAYLOAD_BYTES / (1024 * 1024)} MB"
+                    Toast.makeText(this, getString(R.string.share_too_large, limit), Toast.LENGTH_LONG).show()
+                }
+                deliverPendingShares()
+            }
+        }.start()
+    }
+
+    // Drains the inbox into the page. An item is removed only once the page's
+    // sink took it, so one that arrives before the page has loaded waits for
+    // onPageFinished.
+    private fun deliverPendingShares() {
+        shareInbox.sweepStalePayloads()
+        if (!webAppReady) return
+        for (item in shareInbox.pending()) {
+            val id = item.optString("id")
+            if (!deliveringShares.add(id)) continue
+            val js = "window.__readymadeDeliverShare ? (window.__readymadeDeliverShare($item), true) : false"
+            webView.evaluateJavascript(js) { result ->
+                deliveringShares.remove(id)
+                if (result == "true") {
+                    shareInbox.remove(id)
+                } else {
+                    Log.w(TAG, "Share $id not delivered: the page has no share sink")
+                }
+            }
         }
     }
 
@@ -118,6 +192,13 @@ class MainActivity : Activity() {
             }
         }
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String) {
+                // The page and its share sink are live: deliver what was
+                // shared before it was (a cold start from the share sheet).
+                webAppReady = true
+                deliverPendingShares()
+            }
+
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 val uri = request.url
                 // The bundled app must be served from an http(s) origin: Chromium
@@ -127,7 +208,7 @@ class MainActivity : Activity() {
                     return null
                 }
                 return try {
-                    serveAppAsset(uri)
+                    serveAppAsset(uri, request.isForMainFrame)
                 } catch (error: Exception) {
                     Log.e(TAG, "Failed to serve ${uri}", error)
                     WebResourceResponse(
@@ -143,7 +224,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun serveAppAsset(uri: Uri): WebResourceResponse {
+    private fun serveAppAsset(uri: Uri, forMainFrame: Boolean): WebResourceResponse {
         val path = normalizedAssetPath(uri.path ?: "")
         val relativePath = when {
             path.isEmpty() || path == "index.html" -> "index.html"
@@ -155,11 +236,19 @@ class MainActivity : Activity() {
         }
 
         val data = assets.open("WebApp/$relativePath").use { it.readBytes() }
-        val responseData = if (relativePath == "index.html") injectBridge(data) else data
-        val headers = mapOf(
-            "Access-Control-Allow-Origin" to "*",
-            "Cache-Control" to if (BuildConfig.DEBUG) "no-store" else "public, max-age=31536000",
-        )
+        val isPage = relativePath == "index.html"
+        // The vault and the bridge token go only into the app's own top-level
+        // page, as the iOS shell's main-frame-only script does: a frame, or a
+        // fetch from any page, gets the page without them.
+        val responseData = if (isPage) injectBridge(data, forMainFrame) else data
+        val headers = buildMap {
+            // The page is never readable from another origin; the assets
+            // carry nothing private and stay open to CORS requests.
+            if (!isPage) put("Access-Control-Allow-Origin", "*")
+            // The page carries the vault, written into it as it is served: it
+            // is never kept, so each load reads what is held now.
+            put("Cache-Control", if (BuildConfig.DEBUG || isPage) "no-store" else "public, max-age=31536000")
+        }
         return WebResourceResponse(
             mimeType(relativePath),
             "utf-8",
@@ -179,7 +268,7 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val html = URL(devUrl).openStream().use { it.readBytes() }
-                val injected = String(injectBridge(html), Charsets.UTF_8)
+                val injected = String(injectBridge(html, forMainFrame = true), Charsets.UTF_8)
                 runOnUiThread {
                     webView.loadDataWithBaseURL(devUrl, injected, "text/html", "utf-8", null)
                 }
@@ -190,10 +279,10 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun injectBridge(htmlBytes: ByteArray): ByteArray {
+    private fun injectBridge(htmlBytes: ByteArray, forMainFrame: Boolean): ByteArray {
         val html = String(htmlBytes, Charsets.UTF_8)
         val marker = "</head>"
-        val injected = "<script>${bridgeScript()}</script>"
+        val injected = "<script>${bridgeScript(forMainFrame)}</script>"
         return if (html.contains(marker, ignoreCase = true)) {
             html.replace(marker, "$injected$marker", ignoreCase = true)
         } else {
@@ -201,11 +290,27 @@ class MainActivity : Activity() {
         }.toByteArray(Charsets.UTF_8)
     }
 
-    private fun bridgeScript(): String {
+    private fun bridgeScript(forMainFrame: Boolean): String {
         val remoteName = jsLiteral(getString(R.string.hkp_runtime_remote_name).ifBlank { "meander-android" })
+        // A frame gets no token, so the native bridges refuse it (BridgeToken).
+        val bridgeToken = jsLiteral(if (forMainFrame) BridgeToken.value else "")
         return """
             (() => {
+              // Kept in this closure, not on window: only the shims below
+              // present it, and a frame cannot reach it through the parent.
+              const bridgeToken = $bridgeToken;
               window.__MEANDER_ANDROID__ = true;
+              // The sink a share is delivered to (deliverPendingShares), as on
+              // iOS: one that arrives before React mounts waits on the queue,
+              // later ones call the app's handler directly.
+              window.__READYMADE_SHARES__ = window.__READYMADE_SHARES__ || [];
+              window.__readymadeDeliverShare = function (env) {
+                try {
+                  window.__READYMADE_SHARES__.push(env);
+                  if (window.__readymadeOnShare) { window.__readymadeOnShare(env); }
+                } catch (e) {}
+              };
+              ${if (forMainFrame) router.secretsScript() else ""}
               window.__MEANDER_CONFIG__ = Object.assign(window.__MEANDER_CONFIG__ || {}, {
                 runtimeBaseURL: "hkp://remotes/" + $remoteName
               });
@@ -250,7 +355,7 @@ class MainActivity : Activity() {
                 const method = (init.method || request?.method || "GET").toUpperCase();
                 const headers = headersObject(init.headers || request?.headers);
                 const body = init.body ?? (request && method !== "GET" && method !== "HEAD" ? await request.arrayBuffer() : null);
-                const raw = AndroidHkpBridge.fetch(JSON.stringify({
+                const raw = AndroidHkpBridge.fetch(bridgeToken, JSON.stringify({
                   url: String(url),
                   method,
                   headers,
@@ -264,10 +369,10 @@ class MainActivity : Activity() {
                 });
               };
               window.hkpAuth = {
-                postMessage: async (body) => JSON.parse(AndroidAuthBridge.postMessage(JSON.stringify(body || {})))
+                postMessage: async (body) => JSON.parse(AndroidAuthBridge.postMessage(bridgeToken, JSON.stringify(body || {})))
               };
               window.hkpRuntimeAuth = {
-                postMessage: (body) => AndroidRuntimeAuthBridge.postMessage(JSON.stringify(body || {}))
+                postMessage: (body) => AndroidRuntimeAuthBridge.postMessage(bridgeToken, JSON.stringify(body || {}))
               };
               console.log("Android HKP bridge installed @ " + location.href);
             })();

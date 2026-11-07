@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A pinned board's launcher icon: four tiles, the same glyph the iOS quick
+     actions and widget use. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#1A1A1A"
+        android:pathData="M24,0a24,24 0,1 1,0 48a24,24 0,1 1,0 -48z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M14,14h8.5v8.5h-8.5zM25.5,14h8.5v8.5h-8.5zM14,25.5h8.5v8.5h-8.5zM25.5,25.5h8.5v8.5h-8.5z" />
+</vector>

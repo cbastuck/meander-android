@@ -5,10 +5,33 @@ import android.webkit.JavascriptInterface
 import com.readymadeit.meander.auth.AuthSessionBridge
 import com.readymadeit.meander.runtime.RuntimeHost
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.security.SecureRandom
+
+/**
+ * What the app's own page presents with every call into the bridges below.
+ *
+ * `addJavascriptInterface` puts them into every frame, cross-origin ones
+ * included, so having the objects proves nothing. The token is written only
+ * into the top-level page the app serves (MainActivity.bridgeScript), inside
+ * the bridge script's closure rather than on `window`, and a call without it
+ * is refused — as the vault is kept out of frames.
+ */
+object BridgeToken {
+    /** Drawn once per process, like the secrets token (SecretsPage). */
+    val value: String = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        .joinToString("") { "%02x".format(it) }
+
+    fun matches(presented: String?): Boolean =
+        presented != null && MessageDigest.isEqual(presented.toByteArray(), value.toByteArray())
+}
 
 class HkpJavascriptBridge(private val router: HkpSchemeRouter) {
     @JavascriptInterface
-    fun fetch(requestJson: String): String {
+    fun fetch(token: String?, requestJson: String): String {
+        if (!BridgeToken.matches(token)) {
+            return failure(403, "The native bridge serves the app's own page")
+        }
         return try {
             val payload = JSONObject(requestJson)
             val headersJson = payload.optJSONObject("headers") ?: JSONObject()
@@ -32,19 +55,22 @@ class HkpJavascriptBridge(private val router: HkpSchemeRouter) {
                 ),
             ).toString()
         } catch (error: Exception) {
-            JSONObject(
-                mapOf(
-                    "status" to 500,
-                    "mimeType" to "application/json",
-                    "headers" to JSONObject(),
-                    "bodyBase64" to Base64.encodeToString(
-                        """{"error":"${escape(error.message ?: "Native bridge failed")}"}""".toByteArray(Charsets.UTF_8),
-                        Base64.NO_WRAP,
-                    ),
-                ),
-            ).toString()
+            failure(500, error.message ?: "Native bridge failed")
         }
     }
+
+    private fun failure(status: Int, message: String): String =
+        JSONObject(
+            mapOf(
+                "status" to status,
+                "mimeType" to "application/json",
+                "headers" to JSONObject(),
+                "bodyBase64" to Base64.encodeToString(
+                    """{"error":"${escape(message)}"}""".toByteArray(Charsets.UTF_8),
+                    Base64.NO_WRAP,
+                ),
+            ),
+        ).toString()
 
     private fun escape(value: String): String =
         value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
@@ -52,7 +78,8 @@ class HkpJavascriptBridge(private val router: HkpSchemeRouter) {
 
 class RuntimeAuthJavascriptBridge(private val runtimeHost: RuntimeHost) {
     @JavascriptInterface
-    fun postMessage(requestJson: String) {
+    fun postMessage(token: String?, requestJson: String) {
+        if (!BridgeToken.matches(token)) return
         val body = JSONObject(requestJson)
         val email = body.optString("email", "")
         runtimeHost.setLoginUsers(if (email.isBlank()) emptyList() else listOf(email))
@@ -61,6 +88,10 @@ class RuntimeAuthJavascriptBridge(private val runtimeHost: RuntimeHost) {
 
 class NativeAuthJavascriptBridge(private val authSessionBridge: AuthSessionBridge) {
     @JavascriptInterface
-    fun postMessage(requestJson: String): String =
-        authSessionBridge.login(requestJson)
+    fun postMessage(token: String?, requestJson: String): String =
+        if (BridgeToken.matches(token)) {
+            authSessionBridge.login(requestJson)
+        } else {
+            JSONObject(mapOf("error" to "The native bridge serves the app's own page")).toString()
+        }
 }
