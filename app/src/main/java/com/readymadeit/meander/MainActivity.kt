@@ -3,6 +3,7 @@ package com.readymadeit.meander
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -192,6 +193,32 @@ class MainActivity : Activity() {
             }
         }
         webView.webViewClient = object : WebViewClient() {
+            // Only the app's own pages load in this view. A web address the
+            // person asked for — a link, target="_blank", window.open() — opens
+            // in their browser instead, as on the desktop
+            // (meander/backend/pageTrust.h, decideNavigation). One a page asks
+            // for on its own, a redirect included, is only refused, so no page
+            // can open the browser at will or take the app's place in its own
+            // window. Without multiple windows a target="_blank" link arrives
+            // here as a navigation of this one. Frames are left alone: what a
+            // board embeds is the board's to load.
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val uri = request.url
+                if (!request.isForMainFrame || (uri.scheme != "http" && uri.scheme != "https") || isOwnPage(uri)) {
+                    return false
+                }
+                if (request.hasGesture() && !request.isRedirect) {
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    } catch (error: ActivityNotFoundException) {
+                        Log.w(TAG, "No app to open $uri", error)
+                    }
+                } else {
+                    Log.w(TAG, "Not one of the app's pages, not loaded: $uri")
+                }
+                return true
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 // The page and its share sink are live: deliver what was
                 // shared before it was (a cold start from the share sheet).
@@ -222,6 +249,15 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    /** Whether `uri` is the bundled app, or the dev server standing in for it. */
+    private fun isOwnPage(uri: Uri): Boolean {
+        if (uri.scheme == "https" && uri.host == BUNDLED_APP_HOST) {
+            return true
+        }
+        val dev = getString(R.string.dev_webapp_url).takeIf { it.isNotBlank() }?.let(Uri::parse)
+        return dev != null && uri.scheme == dev.scheme && uri.host == dev.host && uri.port == dev.port
     }
 
     private fun serveAppAsset(uri: Uri, forMainFrame: Boolean): WebResourceResponse {
